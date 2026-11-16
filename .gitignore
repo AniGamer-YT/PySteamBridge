@@ -1,0 +1,14 @@
+# Valve's redistributable is covered by the Steamworks SDK Access
+# Agreement, not this project's licence. It must never be committed
+# here. Fetch it from the Steamworks partner site and keep it local.
+*.dll
+*.so
+*.dylib
+steam_appid.txt
+
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.venv/
