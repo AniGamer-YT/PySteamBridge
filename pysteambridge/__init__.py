@@ -15,18 +15,43 @@ unchanged under either import:
 
     from steamworks import STEAMWORKS     # same objects
 
-Only the flat C API function names covered by the sub-interfaces in
-steamworks.py are wired (SteamUserStats, SteamUser, SteamFriends,
-SteamApps, SteamRemoteStorage). Add more if you need them.
+Eight interfaces are wired: SteamUserStats, SteamUser, SteamFriends,
+SteamApps, SteamUtils, SteamMusic, SteamScreenshots and
+SteamRemoteStorage. Interfaces whose answers come back through Steam's
+callback dispatch rather than a return value are not here; the module
+docstring in steamworks.py says which, and why.
 
 Anything callers import has to be re-exported HERE, not just defined
 in steamworks.py: the package shadows the module.
 """
 from .steamworks import (
     STEAMWORKS,
+    EGamepadTextInputLineMode,
+    EGamepadTextInputMode,
+    ENotificationPosition,
+    EPersonaState,
+    FriendFlags,
+    GenericSteamException,
+    MissingSteamworksLibraryException,
+    SteamConnectionException,
+    SteamNotLoadedException,
     SteamNotRunningException,
+    UnsupportedPlatformException,
     restart_app_if_necessary,
 )
 
-__all__ = ["STEAMWORKS", "SteamNotRunningException",
-           "restart_app_if_necessary"]
+__all__ = [
+    "STEAMWORKS",
+    "EGamepadTextInputLineMode",
+    "EGamepadTextInputMode",
+    "ENotificationPosition",
+    "EPersonaState",
+    "FriendFlags",
+    "GenericSteamException",
+    "MissingSteamworksLibraryException",
+    "SteamConnectionException",
+    "SteamNotLoadedException",
+    "SteamNotRunningException",
+    "UnsupportedPlatformException",
+    "restart_app_if_necessary",
+]
