@@ -17,10 +17,14 @@ from pysteambridge import STEAMWORKS
 
 api = STEAMWORKS()
 api.initialize()
-api.UserStats.RequestCurrentStats()
 api.UserStats.SetAchievement(b"FIRST_WIN")
 api.UserStats.StoreStats()
+print(api.Friends.GetPlayerName(), api.Utils.GetIPCountry())
 ```
+
+Eight interfaces are wired: `UserStats`, `Users`, `Friends`, `Apps`,
+`Utils`, `Music`, `Screenshots` and `RemoteStorage`. Ninety-one
+methods over ninety flat-API functions, all listed further down.
 
 ## Why this exists
 
@@ -105,13 +109,18 @@ Row 3 is worth avoiding as your only copy: the working directory is
 wherever the player happened to launch from, which is not somewhere
 you control.
 
-If nothing is found, the loader raises `OSError` listing every path it
-tried, so a missing binary is never a mystery:
+If nothing is found, the loader raises
+`MissingSteamworksLibraryException` listing every path it tried, so a
+missing binary is never a mystery:
 
 ```
-OSError: Steamworks binary not found. Looked for steam_api64.dll,
-steam_api.dll in: C:\yourgame\pysteambridge\steam_api64.dll | ...
+MissingSteamworksLibraryException: Steamworks binary not found. Looked
+for steam_api64.dll, steam_api.dll in:
+C:\yourgame\pysteambridge\steam_api64.dll | ...
 ```
+
+That exception is also an `OSError`, which is what this used to raise,
+so either `except` clause catches it.
 
 Keep the file name exactly as Valve ships it. Do not rename, and on
 Windows use the 64-bit `steam_api64.dll` unless your interpreter is
@@ -194,8 +203,26 @@ got = steam.UserStats.GetAchievement(b"FIRST_WIN")
 trip has not landed, or that name is not in your app's schema. Code
 that revokes or syncs achievements must not treat it as "locked".
 
-Call `RequestCurrentStats()` once after init and give Steam a few
-callback pumps before trusting reads.
+Give Steam a few `run_callbacks()` pumps after init before trusting a
+read. Fetching the player's stats is something Steam now starts by
+itself during init, and it arrives a moment later over those pumps.
+`RequestCurrentStats()` is still here because SteamworksPy has it, but
+current SDKs no longer export it and it returns `False`: that means
+"nothing to ask", not a failure.
+
+Stats work the same way, and are declared alongside achievements on
+the partner site:
+
+```python
+steam.UserStats.SetStat(b"ENEMIES_KILLED", 41)      # int stat
+steam.UserStats.SetStat(b"DISTANCE_RUN", 12.5)      # float stat
+steam.UserStats.StoreStats()
+kills = steam.UserStats.GetStatInt(b"ENEMIES_KILLED")
+```
+
+A Python `float` picks the SDK's float setter and an `int` picks the
+int one, so the type you pass has to match how the stat was declared
+or Steam rejects the write.
 
 ## 7. Put a save in the Cloud
 
@@ -257,7 +284,6 @@ if restart_app_if_necessary(APP_ID):
 try:
     steam = STEAMWORKS()
     steam.initialize()
-    steam.UserStats.RequestCurrentStats()
 except Exception:
     steam = None
     print("running without Steam")
@@ -286,10 +312,12 @@ from steamworks import STEAMWORKS      # SteamworksPy-compatible alias
 
 Both give the same object. The `steamworks` package contains no
 implementation: it re-exports pysteambridge and registers
-`steamworks.steamworks` as an alias of `pysteambridge.steamworks`, so
-`isinstance` and `except SteamNotRunningException` hold whichever
-import a caller used. Migrating off SteamworksPy means swapping the
-folder, with no edit to a single call site.
+`steamworks.steamworks`, `steamworks.enums` and
+`steamworks.exceptions` as aliases of the one implementation module,
+so `isinstance`, `except SteamNotRunningException` and
+`from steamworks.enums import FriendFlags` all hold whichever import a
+caller used. Migrating off SteamworksPy means swapping the folder,
+with no edit to a single call site.
 
 > **Conflict note.** If SteamworksPy is already installed in the same
 > environment, do not copy the `steamworks/` folder in. Two things
@@ -297,21 +325,203 @@ folder, with no edit to a single call site.
 > path order. Vendor `pysteambridge/` alone and import it under its
 > own name.
 
+## More of the SDK than achievements
+
+### The overlay, and what friends see
+
+Every way of opening the Steam overlay is on `Friends`, including the
+one that saves you shipping an in-game browser:
+
+```python
+steam.Friends.ActivateGameOverlay("Friends")        # or Community, Settings...
+steam.Friends.ActivateGameOverlayToWebPage("https://example.com/patch-notes")
+steam.Friends.ActivateGameOverlayToStore(480)
+steam.Friends.ActivateGameOverlayToUser("steamid", friend_id)
+```
+
+Rich presence is the line Steam shows under your game in a friend's
+list. The keys it renders are configured per app on the partner site;
+an unconfigured key is stored but never displayed.
+
+```python
+steam.Friends.SetGameInfo("status", "Frozen Frontier, 3 lives left")
+steam.Friends.ClearGameInfo()
+```
+
+And the friends list itself:
+
+```python
+from pysteambridge import FriendFlags
+
+for i in range(steam.Friends.GetFriendCount(FriendFlags.IMMEDIATE)):
+    sid = steam.Friends.GetFriendByIndex(i, FriendFlags.IMMEDIATE)
+    print(steam.Friends.GetFriendPersonaName(sid))
+```
+
+The order is not stable between calls, so read the count and the
+indices in the same frame.
+
+### Ownership, DLC and install paths
+
+```python
+steam.Apps.IsSubscribed()                   # owns the app we run as
+steam.Apps.IsDLCInstalled(123456)
+steam.Apps.InstallDLC(123456)               # then poll IsDLCInstalled
+steam.Apps.GetAppBuildId()                  # a real build number for bug reports
+steam.Apps.GetCurrentGameLanguage()         # "english", "brazilian", ...
+steam.Apps.GetEarliestPurchaseUnixTime(my_app_id)   # early supporter?
+steam.Apps.GetLaunchQueryParam("connect")   # parameters from a steam:// link
+```
+
+`GetAppInstallDir(app_id)` answers with the path an app would occupy
+whether or not it is there, so pair it with `IsAppInstalled` rather
+than reading a path as proof.
+
+### Clock, locale and overlay state
+
+```python
+steam.Utils.GetServerRealTime()      # Steam's clock, not the player's
+steam.Utils.GetIPCountry()           # "SG", "DE", ...
+steam.Utils.GetSteamUILanguage()
+steam.Utils.IsOverlayEnabled()
+steam.Utils.OverlayNeedsPresent()    # the overlay drew: flip this frame
+steam.Utils.GetCurrentBatteryPower() # percent left, or 255 on mains
+steam.Utils.IsSteamInBigPictureMode()
+```
+
+`GetServerRealTime()` is the one to trust for anything a player could
+cheat by moving their system clock: daily rewards, timed events, run
+timings.
+
+Overlay notifications can be moved out from under your HUD:
+
+```python
+from pysteambridge import ENotificationPosition
+
+steam.Utils.SetOverlayNotificationPosition(ENotificationPosition.TOP_LEFT)
+steam.Utils.SetOverlayNotificationInset(16, 16)
+```
+
+### Steam's music player
+
+Not your game's audio: the player's own Steam music, which you can
+duck during a cutscene and hand back afterwards.
+
+```python
+if steam.Music.MusicIsEnabled() and steam.Music.MusicIsPlaying():
+    was_playing = True
+    steam.Music.MusicPause()
+...
+if was_playing:
+    steam.Music.MusicPlay()
+```
+
+### Screenshots
+
+```python
+steam.Screenshots.TriggerScreenshot()       # exactly as the player's key would
+handle = steam.Screenshots.AddScreenshotToLibrary("shot.png", None, 1920, 1080)
+steam.Screenshots.SetLocation(handle, "Frozen Frontier")
+```
+
+`HookScreenshots(True)` takes the player's screenshot key over, so
+Steam stops writing its own capture and asks your game to write one
+instead. That request arrives as a callback, which this wrapper does
+not pump yet, so leave the hook off until it does or the key does
+nothing.
+
 ## What is actually wired up
+
+Ninety-one methods over ninety flat-API functions, across eight
+interfaces. Names and argument order follow SteamworksPy, so a call
+site written against that package works here unchanged.
 
 | Interface | Methods |
 |---|---|
-| `UserStats` | `RequestCurrentStats`, `SetAchievement`, `ClearAchievement`, `StoreStats`, `GetNumAchievements`, `GetAchievement`, `GetAchievementName` |
-| `Users` | `GetSteamID` |
-| `Friends` | `GetPlayerName` |
-| `Apps` | `BIsSubscribed`, `BIsSubscribedApp` |
+| `UserStats` | `RequestCurrentStats`, `SetAchievement`, `ClearAchievement`, `StoreStats`, `GetNumAchievements`, `GetAchievement`, `GetAchievementName`, `GetAchievementDisplayAttribute`, `GetStatInt`, `GetStatFloat`, `SetStat`, `ResetAllStats` |
+| `Users` | `GetSteamID`, `LoggedOn`, `GetPlayerSteamLevel`, `GetGameBadgeLevel`, `GetAuthSessionTicket` |
+| `Friends` | `GetPlayerName`, `GetPlayerState`, `GetFriendCount`, `GetFriendByIndex`, `GetFriendPersonaName`, `GetFriendPersonaState`, `SetGameInfo`, `ClearGameInfo`, `InviteFriend`, `SetPlayedWith`, `ActivateGameOverlay`, `ActivateGameOverlayToUser`, `ActivateGameOverlayToWebPage`, `ActivateGameOverlayToStore`, `ActivateGameOverlayInviteDialog` |
+| `Apps` | `IsSubscribed`, `BIsSubscribed`, `IsSubscribedApp`, `BIsSubscribedApp`, `IsSubscribedFromFreeWeekend`, `IsLowViolence`, `IsCybercafe`, `IsVACBanned`, `GetCurrentGameLanguage`, `GetAvailableGameLanguages`, `GetDLCCount`, `IsDLCInstalled`, `InstallDLC`, `UninstallDLC`, `GetAppInstallDir`, `IsAppInstalled`, `GetAppOwner`, `GetAppBuildId`, `GetEarliestPurchaseUnixTime`, `GetLaunchQueryParam`, `MarkContentCorrupt`, `GetFileDetails` |
+| `Utils` | `GetAppID`, `GetIPCountry`, `GetSteamUILanguage`, `GetServerRealTime`, `GetSecondsSinceAppActive`, `GetSecondsSinceComputerActive`, `GetCurrentBatteryPower`, `GetIPCCallCount`, `IsOverlayEnabled`, `OverlayNeedsPresent`, `IsSteamInBigPictureMode`, `SetOverlayNotificationPosition`, `SetOverlayNotificationInset`, `ShowGamepadTextInput`, `IsVRHeadsetStreamingEnabled`, `SetVRHeadsetStreamingEnabled`, `StartVRDashboard` |
+| `Music` | `MusicIsEnabled`, `MusicIsPlaying`, `MusicGetVolume`, `MusicSetVolume`, `MusicPlay`, `MusicPause`, `MusicPlayNext`, `MusicPlayPrev` |
+| `Screenshots` | `TriggerScreenshot`, `AddScreenshotToLibrary`, `SetLocation`, `HookScreenshots`, `IsScreenshotsHooked` |
 | `RemoteStorage` | `FileWrite`, `FileRead`, `FileExists`, `FileDelete`, `GetFileSize`, `IsCloudEnabledForApp`, `IsCloudEnabledForAccount` |
 
-Plus `restart_app_if_necessary(app_id)` at module level.
+On the handle itself: `initialize()`, `run_callbacks()`, `shutdown()`,
+`loaded()`, `relaunch(app_id)`, `unload()` and `app_id`. Plus
+`restart_app_if_necessary(app_id)` at module level, which `relaunch`
+is SteamworksPy's name for.
 
-Adding an interface is a few lines: bind the flat export with the
-`_bind` helper and call it through `_call`. See `_UserStats` in
-`pysteambridge/steamworks.py` for the shape. Pull requests welcome.
+`RemoteStorage` is this wrapper's own addition. SteamworksPy has no
+such interface, so nothing written against that package can collide
+with it.
+
+Two string getters return `bytes` rather than `str`, because they did
+so before the rest of the surface existed and call sites decode them
+themselves: `Friends.GetPlayerName` and `UserStats.GetAchievementName`.
+Every other string getter returns `str`, the way SteamworksPy does.
+
+### Enums and exceptions
+
+`FriendFlags`, `ENotificationPosition`, `EGamepadTextInputMode`,
+`EGamepadTextInputLineMode` and `EPersonaState` are importable from
+either package name, and from `steamworks.enums` as well. They are
+`IntEnum`, not `Enum`, so a member works both as an enum and as the
+bare int the SDK wants: passing an int keeps working.
+
+The exceptions are SteamworksPy's names, importable from
+`steamworks.exceptions` too: `GenericSteamException` (the base),
+`SteamNotRunningException`, `MissingSteamworksLibraryException`,
+`SteamNotLoadedException`, `SteamConnectionException` and
+`UnsupportedPlatformException`. Only the first two are ever raised
+here; the rest exist so an `except` clause written against
+SteamworksPy compiles.
+
+## What is not wired up, and why
+
+Matchmaking, Workshop, Input and MicroTxn are absent, along with
+leaderboards on `UserStats`. Every useful call on those returns its
+answer through Steam's callback and call-result dispatch rather than
+as a return value, which needs the manual-dispatch pump
+(`SteamAPI_ManualDispatch_*`) rather than a plain function call.
+
+The same goes for a handful of calls that are here: `InstallDLC`,
+`GetFileDetails`, `ShowGamepadTextInput` and `HookScreenshots` fire
+their request, but their completion is not reported back.
+
+Wiring that dispatch loop is the one piece of work standing between
+this wrapper and those interfaces. It is the most useful pull request
+anyone could send.
+
+## Adding an interface
+
+Each interface is an `_Interface` subclass with two class attributes:
+`_PREFIX`, the flat-API prefix, and `_BINDINGS`, a table of (short
+name, argument types after the interface pointer, return type).
+Everything is bound once at construction, and a method body is then
+one line through `_bool`, `_int`, `_float`, `_str`, `_bytes` or
+`_void`:
+
+```python
+class _Music(_Interface):
+    _PREFIX = "SteamAPI_ISteamMusic_"
+    _BINDINGS = (
+        ("BIsPlaying", [], _BOOL),
+        ("SetVolume",  [_FLT], None),
+    )
+
+    def MusicIsPlaying(self):
+        return self._bool("BIsPlaying")
+
+    def MusicSetVolume(self, volume):
+        return self._void("SetVolume", _FLT(float(volume)))
+```
+
+Add the new class to `STEAMWORKS._INTERFACES` with its accessor tuple
+and it is attached, logged at init, and no-opped when absent. The flat
+export names are in `sdk/public/steam/steam_api_flat.h`, and the one
+authority on what your redistributable actually exports is its own
+export table. Pull requests welcome.
 
 ## Shipping it with PyInstaller
 
@@ -341,11 +551,14 @@ line in `sdk/public/steam/isteam*.h`.
 
 | Symptom | Cause |
 |---|---|
-| `OSError: Steamworks binary not found` | Step 2. The message lists every path searched. |
+| `MissingSteamworksLibraryException: Steamworks binary not found` | Step 2. The message lists every path searched. |
 | `SteamNotRunningException` | Steam client not running, account does not own the App ID, or `steam_appid.txt` is missing or wrong. |
 | Achievement never appears | `StoreStats()` not called, or the API name does not match the partner site. |
-| `GetAchievement` returns `None` forever | `RequestCurrentStats()` not called, or `run_callbacks()` never runs. |
-| Everything returns `False` / `0` / `b""` | `initialize()` failed and you carried on. That is by design; check its exception. |
+| `GetAchievement` returns `None` forever | `run_callbacks()` never runs, so the stats round-trip never lands. |
+| `RequestCurrentStats()` returns `False` | Expected on a current SDK, which no longer exports it. Steam fetches stats itself during init. |
+| One interface is `MISSING` in the init log | Your redistributable exports no accessor version this wrapper knows. See "When Valve bumps the SDK". |
+| Everything returns `False` / `0` / `""` / `b""` | `initialize()` failed and you carried on, or that interface was `MISSING`. The no-op is by design; check the exception and the init log. |
+| A `Set...` call returns `True` but nothing changes on Steam | Some calls only queue; `StoreStats()` is the commit for stats and achievements. |
 
 ## Licence, and Valve's half of it
 
